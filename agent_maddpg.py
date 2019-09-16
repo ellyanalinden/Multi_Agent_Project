@@ -3,7 +3,7 @@ import random
 import copy
 from collections import namedtuple, deque
 
-from model import Actor, Critic
+from model_maddpg import Actor, Critic
 
 import torch
 import torch.nn.functional as F
@@ -17,21 +17,25 @@ TAU = 1e-3                      # For soft update of target parameters
 LR_ACTOR = 2e-4                 # Learning rate of the actor
 LR_CRITIC = 2e-4                # Learning rate of the critic
 WEIGHT_DECAY = 0                # L2 weight decay
+OU_SIGMA = 0.1                  # Ornstein-Uhlenbeck noise parameter, volatility
+OU_THETA = 0.15                 # Ornstein_Uhlenbeck noise parameter, speed of mean reversion
 
-device = torch.device("cuda:0" if torch.cude.is_available() else "cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 class Agent():
     """Interacts with and learns from the environment"""
-    def __init__(self, state_size, action_size, random_seed):
+    def __init__(self, state_size, action_size, random_seed, num_agents):
         """Initialize an Agent Object
         Parameters:
             state_size(int): dimension of each state
             action_size(int): dimension of each action
             random_seed(int): random_seed
+            num_agents(int): number of agents
         """
         self.state_size = state_size
         self.action_size = action_size
         self.seed = random.seed(random_seed)
+        self.num_agents = num_agents
     
         # Actor Network (w/ Target Network)
         self.actor_local = Actor(state_size, action_size, random_seed).to(device)
@@ -49,7 +53,7 @@ class Agent():
         # Replay Memory
         self.memory = ReplayBuffer(action_size, BUFFER_SIZE, BATCH_SIZE, random_seed)
         
-    def step(self, state, action, reward, next_state, done):
+    def step(self, state, action, reward, next_state, done, agent_number):
         """Save experience in replay memory, and use random sample from buffer to learn"""
         # Save experience/reward
         self.memory.add(state, action, reward, next_state, done)
@@ -57,14 +61,18 @@ class Agent():
         # learn, if enough samples are available in memory
         if len(self.memory) > BATCH_SIZE:
             experiences = self.memory.sample()
-            self.learn(experiences, GAMMA)
+            self.learn(experiences, GAMMA, agent_number)
             
     def act(self, state, add_noise=True):
         """Returns actions for given state as per current policy"""
         state = torch.from_numpy(state).float().to(device)
+        actions = np.zeros(self.num_agents, self.action_size)
         self.actor_local.eval()
         with torch.no_grad():
-            action = self.actor_local(state).cpu().data.numpy()
+            # get action for each agent and concatenate them
+            for agent_num, state in enumerate(states):
+                action = self.actor_local(state).cpu().data.numpy()
+                actions[agent_num, :] = action
         self.actor_local.train()
         if add_noise:
             action += self.noise.sample()
@@ -73,7 +81,7 @@ class Agent():
     def reset(self):
         self.noise.reset()
         
-    def learn(self.experiences, gamma):
+    def learn(self,experiences, gamma, agent_number):
         """Update policy and value parameters using give batch of experience tuples
          Q_targets = r + γ * critic_target(next_state, actor_target(next_state))
          where:
@@ -89,6 +97,11 @@ class Agent():
         # Update Critic
         # Get predicted next_states actions and Q values from target models
         actions_next = self.actor_target(next_states)
+        #Construct next actions vector relative to the agent
+        if agent_number == 0:
+            actions_next = torch.cat((actions_next, actions[:,2:]), dim=1)
+        else:
+            actions_next = torch.cat((actions[:,:2], actions_next), dim=1)
         Q_targets_next = self.critic_target(next_states, actions_next)
         # Compute Q targets for current states (y_i)
         Q_targets = rewards + (gamma * Q_targets_next * (1-dones))
@@ -104,6 +117,12 @@ class Agent():
         # Update Actor
         # Compute Actor loss
         actions_pred = self.actor_local(states)
+        # Construct action prediction vector relative to each agent
+        if agent_number == 0:
+            actions_pred = torch.cat((actions_pred, actions[:,2:]), dim=1)
+        else:
+            actions_pred = torch.cat((actions[:,:2], actions_pred), dim=1)
+        # Compute actor loss
         actor_loss = -self.critic_local(states, actions_pred).mean()
         #Minimize the loss
         self.actor_optimizer.zero_grad()
@@ -128,7 +147,7 @@ class Agent():
 class OUNOISE:
     """Ornstein-Uhlenbeck process"""
     
-    def __init__(self, size, seed, mu=0., theta=0.15, sigma=0.1):
+    def __init__(self, size, seed, mu=0., theta=OU_THETA, sigma=OU_SIGMA):
         """Initialize parameters and noise process"""
         self.mu = mu * np.ones(size)
         self,theta = theta
@@ -172,8 +191,10 @@ class ReplayBuffer:
         experiences = random.sample(self.memory, k=self.batch_size)
         
         states = torch.from_numpy(np.vstack([e.state for e in experiences if e is not None])).float().to(device)
-        actions = torch.from_numpy(np.vstack([e.action for e in experiences if e is not None])).float().to(device)                                 rewards = torch.from_numpy(np.vstack([e.reward for e in experiences if e is not None])).float().to(device)                       
-        next_states = torch.from_numpy(np.vstack([e.next_state for e in experiences if e is not None])).float().to(device)                         dones = torch.from_numpy(np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)).float().to(device)  
+        actions = torch.from_numpy(np.vstack([e.action for e in experiences if e is not None])).float().to(device)                  
+        rewards = torch.from_numpy(np.vstack([e.reward for e in experiences if e is not None])).float().to(device)                       
+        next_states = torch.from_numpy(np.vstack([e.next_state for e in experiences if e is not None])).float().to(device)            
+        dones = torch.from_numpy(np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)).float().to(device)  
         
         return (states, actions, rewards, next_states, dones)
     
